@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (c) 2025 Nexthop Systems Inc.
+
+#include <linux/module.h>
+#include <linux/auxiliary_bus.h>
+#include <linux/sysfs.h>
+#include <linux/io.h>
+#include "nh_fpga_fbiob.h"
+
+#define DRIVER_NAME "nh_fpga_info"
+#define DRIVER_VERSION "1.0"
+
+#define FPGA_VERSION_REG_OFFSET 0x0000
+#define FPGA_VERSION_MAJOR_MASK 0x00000F00
+#define FPGA_VERSION_MAJOR_SHIFT 8
+#define FPGA_VERSION_MINOR_MASK 0x000000FF
+#define FPGA_VERSION_MINOR_SHIFT 0
+
+struct nh_fpga_info {
+	struct auxiliary_device *aux_dev;
+	void __iomem *base;
+	u32 fpga_ver;
+	u32 fpga_sub_ver;
+};
+
+/* Sysfs attribute: fw_ver — "major.minor" per the BSP API spec */
+static ssize_t fw_ver_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct nh_fpga_info *info = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%u.%u\n", info->fpga_ver, info->fpga_sub_ver);
+}
+static DEVICE_ATTR_RO(fw_ver);
+
+static ssize_t fpga_ver_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	struct nh_fpga_info *info = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%u\n", info->fpga_ver);
+}
+static DEVICE_ATTR_RO(fpga_ver);
+
+static ssize_t fpga_sub_ver_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct nh_fpga_info *info = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%u\n", info->fpga_sub_ver);
+}
+static DEVICE_ATTR_RO(fpga_sub_ver);
+
+static struct attribute *fpga_info_attrs[] = {
+	&dev_attr_fw_ver.attr,
+	&dev_attr_fpga_ver.attr,
+	&dev_attr_fpga_sub_ver.attr,
+	NULL,
+};
+
+static const struct attribute_group fpga_info_group = {
+	.attrs = fpga_info_attrs,
+};
+
+static int nh_fpga_info_read_version(struct nh_fpga_info *info)
+{
+	u32 version_reg;
+
+	version_reg = ioread32(info->base + FPGA_VERSION_REG_OFFSET);
+
+	info->fpga_ver = (version_reg & FPGA_VERSION_MAJOR_MASK) >>
+			 FPGA_VERSION_MAJOR_SHIFT;
+	info->fpga_sub_ver = (version_reg & FPGA_VERSION_MINOR_MASK) >>
+			     FPGA_VERSION_MINOR_SHIFT;
+
+	dev_info(&info->aux_dev->dev, "FPGA Version: %u.%u\n", info->fpga_ver,
+		 info->fpga_sub_ver);
+
+	return 0;
+}
+
+static int nh_fpga_info_probe(struct auxiliary_device *aux_dev,
+			      const struct auxiliary_device_id *id)
+{
+	struct nh_fpga_aux_dev *fpga_aux_dev;
+	struct nh_fpga_info *info;
+	int ret;
+
+	fpga_aux_dev = container_of(aux_dev, struct nh_fpga_aux_dev, aux_dev);
+
+	info = devm_kzalloc(&aux_dev->dev, sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	info->aux_dev = aux_dev;
+	info->base = fpga_aux_dev->csr_base;
+
+	ret = nh_fpga_info_read_version(info);
+	if (ret) {
+		dev_err(&aux_dev->dev, "Failed to read FPGA version: %d\n",
+			ret);
+		return ret;
+	}
+
+	ret = devm_device_add_group(&aux_dev->dev, &fpga_info_group);
+	if (ret) {
+		dev_err(&aux_dev->dev,
+			"Failed to create sysfs attributes: %d\n", ret);
+		return ret;
+	}
+
+	auxiliary_set_drvdata(aux_dev, info);
+
+	dev_info(&aux_dev->dev, "NH FPGA info driver registered\n");
+	return 0;
+}
+
+static void nh_fpga_info_remove(struct auxiliary_device *aux_dev)
+{
+	auxiliary_set_drvdata(aux_dev, NULL);
+
+	/* With devm_device_add_groups(), attributes are automatically removed */
+	dev_info(&aux_dev->dev, "NH FPGA info driver removed\n");
+}
+
+static const struct auxiliary_device_id nh_fpga_info_aux_id_table[] = {
+	{
+		.name = "fbiob_pci.fpga_info_iob",
+	},
+	{
+		.name = "fbiob_pci.fpga_info_dom",
+	},
+	{
+		.name = "fbiob_pci.fpga_info",
+	}, /* Generic fallback */
+	{},
+};
+MODULE_DEVICE_TABLE(auxiliary, nh_fpga_info_aux_id_table);
+
+static struct auxiliary_driver nh_fpga_info_aux_driver = {
+	.name = DRIVER_NAME,
+	.probe = nh_fpga_info_probe,
+	.remove = nh_fpga_info_remove,
+	.id_table = nh_fpga_info_aux_id_table,
+};
+
+static int __init nh_fpga_info_init_module(void)
+{
+	int ret;
+
+	pr_info("NH FPGA Info driver v%s loading\n", DRIVER_VERSION);
+
+	ret = auxiliary_driver_register(&nh_fpga_info_aux_driver);
+	if (ret) {
+		pr_err("Failed to register auxiliary driver: %d\n", ret);
+		return ret;
+	}
+
+	pr_info("NH FPGA Info driver loaded successfully\n");
+	return 0;
+}
+
+static void __exit nh_fpga_info_exit_module(void)
+{
+	pr_info("NH FPGA Info driver unloading\n");
+	auxiliary_driver_unregister(&nh_fpga_info_aux_driver);
+	pr_info("NH FPGA Info driver unloaded\n");
+}
+
+module_init(nh_fpga_info_init_module);
+module_exit(nh_fpga_info_exit_module);
+
+MODULE_LICENSE("GPL v2");
+MODULE_AUTHOR("Arif Mohammad <marif@nexthop.ai>");
+MODULE_DESCRIPTION("Nexthop FPGA Information Driver");
+MODULE_VERSION(DRIVER_VERSION);

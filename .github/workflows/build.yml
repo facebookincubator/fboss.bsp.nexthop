@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Build inside an el9 userspace to match the RPM spec's target (dnf,
+    # kernel-devel, rpm-build). stream9 ships a 5.14 kernel-headers, but the BSP
+    # targets a 6.x kernel, so we install the kernel 6.12 package below (this
+    # also creates the /lib/modules/<ver>/build tree the Makefile and spec
+    # resolve against).
+    container:
+      image: quay.io/centos/centos:stream9
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install build tooling
+        run: dnf install -y dnf-plugins-core rpm-build findutils kmod
+
+      - name: Install build dependencies from the RPM spec
+        run: dnf builddep -y --spec rpmbuild/nexthop_bsp_kmods.spec
+
+      - name: Install the build kernel
+        # Install closest easy match to FBOSS kernel version
+        run: |
+          dnf install -y centos-release-kmods-kernel-6.12
+          dnf install -y kernel kernel-devel
+
+      - name: Build kernel modules
+        run: ./build.sh
+
+      - name: Verify the kmods were produced
+        # kmods.json is the single source of truth for the module list (it is
+        # installed by the RPM and consumed by fbsp tooling). Every listed
+        # module must build, and every built module must be listed.
+        run: |
+          # Backported upstream drivers build under kmods/backports/.
+          mods=$(jq -r '.bspKmods[], .sharedKmods[]' kmods/scripts/kmods.json)
+          for m in $mods; do
+            ko="kmods/$m.ko"
+            [ -f "$ko" ] || ko="kmods/backports/$m.ko"
+            test -f "$ko"
+            modinfo "$ko"
+          done
+          built=$(ls kmods/*.ko kmods/backports/*.ko 2>/dev/null | wc -l)
+          listed=$(echo "$mods" | wc -w)
+          if [ "$built" -ne "$listed" ]; then
+            echo "kmods.json lists $listed modules but $built .ko files were built"
+            exit 1
+          fi
+
+      - name: Build the RPM
+        run: ./build_rpm.sh
+
+      - name: Verify the RPM was produced and packages the kmods
+        run: |
+          rpm=$(find rpmbuild/RPMS -name 'nexthop_bsp_kmods-*.rpm' | head -1)
+          if [ -z "$rpm" ]; then
+            echo "Error: no RPM was produced"
+            exit 1
+          fi
+          echo "Built RPM: $rpm"
+          rpm -qlp "$rpm"
+          for m in $(jq -r '.bspKmods[], .sharedKmods[]' kmods/scripts/kmods.json); do
+            rpm -qlp "$rpm" | grep -q "extra/nexthop/$m.ko"
+          done
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nexthop_bsp_kmods-rpm
+          path: rpmbuild/RPMS/**/*.rpm
+          if-no-files-found: error
