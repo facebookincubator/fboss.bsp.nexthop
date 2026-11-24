@@ -1,0 +1,104 @@
+name: Release
+
+# Versions use CalVer: vYYYY.MM.P, where P counts releases within the month
+# starting at 1 (v2026.09.1, v2026.09.2, v2026.10.1, ...). Split into two
+# steps because main is protected.
+#
+# Step 1 (manual): "Run workflow" -> computes the next version and opens a PR
+#                  bumping Version in the spec files.
+# Step 2 (automatic): when a spec change lands on main and the tag v<Version>
+#                     doesn't exist yet, tag the pushed commit.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "rpmbuild/*.spec"
+
+concurrency: release
+
+jobs:
+  bump:
+    name: Open release PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: main
+
+    - name: Bump version and open PR
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        git fetch --tags --quiet origin
+
+        year="$(date +%Y)"
+        month="$(date +%m)"
+        prefix="v${year}.${month}."
+
+        latest_patch=0
+        while read -r tag; do
+          patch="${tag#"$prefix"}"
+          if [[ "$patch" =~ ^[0-9]+$ ]] && ((10#$patch > latest_patch)); then
+            latest_patch=$((10#$patch))
+          fi
+        done < <(git tag -l "${prefix}*")
+
+        version="${year}.${month}.$((latest_patch + 1))"
+        tag="v${version}"
+        branch="release/${tag}"
+        echo "Next version: $version"
+
+        if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+          echo "::error::Branch $branch already exists, merge or close its release PR first"
+          exit 1
+        fi
+
+        spec_files=(rpmbuild/*.spec)
+        for spec in "${spec_files[@]}"; do
+          sed -i -E "s/^Version:.*/Version: ${version}/" "$spec"
+        done
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git switch -c "$branch"
+        git commit -m "Release ${tag}" -- "${spec_files[@]}"
+        git push origin "$branch"
+        gh pr create --base main --head "$branch" \
+          --title "Release ${tag}" \
+          --body "Bump spec version to ${version}. The merged commit will be tagged ${tag} automatically."
+
+  tag:
+    name: Tag release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Tag commit if version is new
+      run: |
+        versions=$(sed -nE 's/^Version:[[:space:]]*([^[:space:]]+).*/\1/p' rpmbuild/*.spec | sort -u)
+        if [[ -z "$versions" || "$versions" == *$'\n'* ]]; then
+          echo "::error::Expected a single Version across rpmbuild/*.spec, got: ${versions:-none}"
+          exit 1
+        fi
+        tag="v${versions}"
+        if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+          echo "Tag $tag already exists, nothing to do"
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git tag -a "$tag" -m "Release ${tag}" "$GITHUB_SHA"
+        git push origin "$tag"
+        echo "Tagged $GITHUB_SHA as $tag"
