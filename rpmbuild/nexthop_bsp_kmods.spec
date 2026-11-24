@@ -1,7 +1,7 @@
 %define kmodsrc %{_sourcedir}/kmods
 %define kver %(ls -1 /lib/modules | sort -rV | head -n 1)
 
-Version:        1.0.0
+Version: 2026.11.1
 Release:        1%{?dist}
 # Want: nexthop_bsp_kmods-6.11.1-1.fboss.el9.x86_64-1.0.0-1
 Name:           nexthop_bsp_kmods-%{kver}-%{version}-1
