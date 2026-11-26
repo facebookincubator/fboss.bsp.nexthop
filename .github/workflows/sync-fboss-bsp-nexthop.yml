@@ -1,0 +1,57 @@
+name: Sync to fboss.bsp.nexthop
+
+# Merges this repo's main into facebookincubator/fboss.bsp.nexthop main and
+# pushes it directly. Each sync is a merge commit, so our commits keep their
+# SHAs there. That repo keeps its own README.md and doesn't get this file.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-fboss-bsp-nexthop
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'nexthop-ai/nexthop.fboss.bsp.kmods'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fboss.bsp.nexthop main
+        uses: actions/checkout@v6
+        with:
+          repository: facebookincubator/fboss.bsp.nexthop
+          ref: main
+          token: ${{ secrets.NEXTHOP_BSP_SYNC_TOKEN }}
+          fetch-depth: 0
+
+      - name: Merge our main and push
+        run: |
+          set -euo pipefail
+          git config user.name "marif-nexthop"
+          git config user.email "193277486+marif-nexthop@users.noreply.github.com"
+          git fetch --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" main
+          src=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$src" HEAD; then
+            echo "fboss.bsp.nexthop already has $src"
+            exit 0
+          fi
+          if ! git merge --no-ff --no-commit "$src"; then
+            git rev-parse -q --verify MERGE_HEAD >/dev/null || { echo "::error::Merge of $src failed"; exit 1; }
+          fi
+          git checkout HEAD -- README.md
+          # Extract this workflow file's name
+          workflow_ref=${GITHUB_WORKFLOW_REF#"$GITHUB_REPOSITORY/"}
+          workflow_file=${workflow_ref%@*}
+          git rm -q -f --ignore-unmatch "$workflow_file"
+          unmerged=$(git diff --name-only --diff-filter=U)
+          if [ -n "$unmerged" ]; then
+            echo "::error::Merge conflicts, sync by hand: $unmerged"
+            exit 1
+          fi
+          git commit -m "Merge nexthop-ai/nexthop.fboss.bsp.kmods@${src:0:10}"
+          git push origin HEAD:main
